@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>CaringBridge First-Post Assistant</title>
-<link rel="stylesheet" href="/frontend/styles.css?v=micfix-3" />
+<link rel="stylesheet" href="/frontend/styles.css?v=micfix-9" />
 </head>
 <body>
 <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -14,11 +14,10 @@
   </header>
   <div class="connection-bar">
     <span id="connection-status" role="status">Starting the app…</span>
-    <button type="button" id="retry-connection-btn" class="btn-quiet" onclick="location.reload()">Retry connection</button>
-    <button type="button" id="check-connection-btn" class="btn-quiet">Check audio / model</button>
+    <span class="connection-actions"><button type="button" id="retry-connection-btn" class="btn-quiet">Retry connection</button><button type="button" id="check-connection-btn" class="btn-quiet">Check audio / model</button></span>
   </div>
-  <p id="startup-error" class="startup-error" role="alert" hidden></p>
   <p id="diagnostics" role="status"></p>
+  <p id="startup-error" class="startup-error" role="alert" hidden></p>
   <script>
     window.showStartupError = function(message) {
       var box = document.getElementById('startup-error');
@@ -39,7 +38,7 @@
   </script>
   <main id="main-content">
     <section class="card conversation-card" aria-label="Conversation">
-      <div class="section-heading"><h2>Let’s talk it through</h2><span id="stage-label" class="badge">Getting started</span></div>
+      <div class="section-heading"><h2>Let’s talk it through</h2></div>
       <div class="speech-settings">
         <label><input type="checkbox" id="speak-replies" checked /> Speak replies</label>
         <label>Voice <select id="voice-select" aria-label="Speaking voice"></select></label>
@@ -86,6 +85,6 @@
   <p class="status-line" id="post-status" role="status" aria-live="polite"></p>
   <footer class="app-footer">You decide what to share. “On device” voices use local speech; “online” voices may send text to your browser’s voice service. Draft recovery stays in this browser tab.</footer>
 </div>
-<script src="/frontend/audio.js?v=micfix-3" onerror="window.showStartupError('Could not load audio.js.')"></script><script src="/frontend/speech.js?v=micfix-3" onerror="window.showStartupError('Could not load speech.js.')"></script><script src="/frontend/app.js?v=micfix-3" onerror="window.showStartupError('Could not load app.js.')"></script>
+<script src="/frontend/audio.js?v=micfix-9" onerror="window.showStartupError('Could not load audio.js.')"></script><script src="/frontend/speech.js?v=micfix-9" onerror="window.showStartupError('Could not load speech.js.')"></script><script src="/frontend/app.js?v=micfix-9" onerror="window.showStartupError('Could not load app.js.')"></script>
 </body>
 </html>

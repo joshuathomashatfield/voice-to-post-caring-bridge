@@ -101,9 +101,6 @@
     }
     const count = Object.values(state.context || {}).filter(v => Array.isArray(v) ? v.length : v).length;
     $('context-count').textContent = `${count} topics shared`;
-    $('stage-label').textContent = ({OPENING: 'Getting started', CURRENT_SITUATION: 'What’s happening',
-      HOW_DOING: 'How things are going', SUPPORT: 'Support', COMMUNICATION: 'Staying in touch',
-      CLOSING_TONE: 'Your tone', READY_TO_DRAFT: 'Ready to draft', DONE: 'Reviewing'})[state.stage] || 'Getting started';
     $('draft-stale').hidden = !state.draft_needs_update;
     $('version-label').textContent = state.version ? `Version ${state.version} · ${({'manual_edit':'your edit', generated:'generated draft', revised:'AI revision'})[state.source] || state.source}` : 'No draft yet';
     updateControls();
