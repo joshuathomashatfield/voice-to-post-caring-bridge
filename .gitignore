@@ -6,3 +6,6 @@ __pycache__/
 .pytest_cache/
 exports/
 *.log
+__pycache__/
+*.pyc
+*.pyo
