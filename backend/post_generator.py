@@ -8,6 +8,7 @@ structured context / original post, matching MASTER PROMPT sections 35-36.
 from __future__ import annotations
 
 import logging
+import json
 
 from backend.config import settings
 from backend.llm.provider import LLMProvider, LLMUnavailableError
@@ -53,7 +54,7 @@ def _format_context(context: PostContext) -> str:
     if context.communication_preferences:
         lines.append(f"Communication preference: {context.communication_preferences}")
     for item in context.additional_notes:
-        lines.append(f"Other note: {item}")
+        lines.append(f"Other note (check meaning; may contain a question, not a fact): {item}")
     return "\n".join(f"- {line}" for line in lines) if lines else "(no facts provided yet)"
 
 
@@ -63,7 +64,7 @@ def _format_privacy(context: PostContext) -> str:
     return "\n".join(f"- Do not include: {c}" for c in context.privacy_constraints)
 
 
-def generate_draft(context: PostContext, current_text: str, llm: LLMProvider) -> str:
+def generate_draft(context: PostContext, current_text: str, llm: LLMProvider, corrections: dict | None = None) -> str:
     prompt = f"""Using ONLY the user-provided facts below, write a first CaringBridge update.
 
 FACTS:
@@ -74,6 +75,11 @@ Tone: {context.tone or "not specified -- match the tone the user has used so far
 
 CURRENT USER-WRITTEN TEXT IF ANY:
 {current_text or "(none yet)"}
+
+USER CORRECTIONS TO THE SHARED NOTES (override conflicting earlier draft details):
+{json.dumps(corrections or {}, ensure_ascii=False)}
+A corrected field with null or [] means the user removed its previous information.
+Do not restore those removed details from the earlier draft. Preserve other manual wording.
 
 PRIVACY CONSTRAINTS:
 {_format_privacy(context)}
@@ -101,7 +107,7 @@ Return only the proposed post.
         raise
 
 
-def revise_post(current_post: str, revision_instruction: str, context: PostContext, llm: LLMProvider) -> str:
+def revise_post(current_post: str, revision_instruction: str, context: PostContext, llm: LLMProvider, corrections: dict | None = None) -> str:
     prompt = f"""Revise the CaringBridge post according to the user's instruction.
 
 ORIGINAL POST:
@@ -113,12 +119,18 @@ USER INSTRUCTION:
 SOURCE FACTS:
 {_format_context(context)}
 
+USER CORRECTIONS TO THE SHARED NOTES (override conflicting earlier draft details):
+{json.dumps(corrections or {}, ensure_ascii=False)}
+A corrected field with null or [] means the user removed its previous information.
+Do not restore those removed details from the earlier draft. Preserve other manual wording.
+
 PRIVACY CONSTRAINTS:
 {_format_privacy(context)}
 
 Rules:
 - Preserve factual accuracy.
-- Do not introduce facts not present in SOURCE FACTS or ORIGINAL POST.
+- Only use facts in SOURCE FACTS, ORIGINAL POST, or explicitly supplied in USER INSTRUCTION.
+- Never infer a medical fact from a request to change style.
 - Follow removal requests exactly.
 - Preserve manually entered information unless the user asks to remove it.
 - Return only the revised post.

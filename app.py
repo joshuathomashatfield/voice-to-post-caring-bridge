@@ -12,13 +12,17 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+
+import httpx
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field
 
 from backend import conversation, post_generator, privacy
 from backend.config import settings
@@ -51,6 +55,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def frontend_cache_policy(request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/frontend/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 llm_provider = get_provider()
 
 
@@ -62,6 +74,8 @@ class NewSessionResponse(BaseModel):
     session_id: str
     welcome_message: str
     first_question: Optional[str]
+    enable_tts: bool = True
+    enable_autosave: bool = True
 
 
 class MessageRequest(BaseModel):
@@ -82,6 +96,7 @@ class TurnResponse(BaseModel):
     ready_to_draft: bool = False
     speak: Optional[str] = None  # text the frontend should optionally read aloud
     error: Optional[str] = None
+    shared_state: dict = Field(default_factory=dict)
 
 
 class ReviseRequest(BaseModel):
@@ -92,6 +107,11 @@ class ReviseRequest(BaseModel):
 class ManualEditRequest(BaseModel):
     session_id: str
     text: str
+
+
+class ContextEditRequest(BaseModel):
+    session_id: str
+    context: PostContext
 
 
 class ExportRequest(BaseModel):
@@ -120,8 +140,9 @@ def _current_privacy_flags(session: SessionState) -> List[str]:
 
 
 def _generate_and_store(session: SessionState) -> str:
-    draft = post_generator.generate_draft(session.context, session.current_post_text or "", llm_provider)
+    draft = post_generator.generate_draft(session.context, session.current_post_text or "", llm_provider, corrections=session.context_corrections)
     session_manager.add_version(session, draft, source="generated")
+    session.draft_needs_update = False
     return draft
 
 
@@ -132,7 +153,7 @@ def _revise_and_store(session: SessionState, instruction: str) -> str:
         # for the next draft rather than failing.
         session.context.additional_notes.append(instruction)
         return _generate_and_store(session)
-    revised = post_generator.revise_post(current, instruction, session.context, llm_provider)
+    revised = post_generator.revise_post(current, instruction, session.context, llm_provider, corrections=session.context_corrections)
     session_manager.add_version(session, revised, source="revised")
     session.ai_revisions += 1
     return revised
@@ -168,6 +189,8 @@ def create_session():
         session_id=session.session_id,
         welcome_message=conversation.WELCOME_MESSAGE,
         first_question=question,
+        enable_tts=settings.enable_tts,
+        enable_autosave=settings.enable_autosave,
     )
 
 
@@ -177,19 +200,48 @@ def clear_session(req: SimpleSessionRequest):
     return {"status": "cleared"}
 
 
-@app.get("/api/state/{session_id}")
-def get_state(session_id: str):
-    session = _get_session(session_id)
+def _shared_state(session: SessionState) -> dict:
+    version = (session.post_versions[session.current_version_index]
+               if session.current_version_index >= 0 else None)
     return {
-        "session_id": session.session_id,
-        "stage": session.stage.value,
         "context": session.context.model_dump(),
-        "conversation_history": [t.model_dump() for t in session.conversation_history],
-        "post_text": session.current_post_text,
-        "post_versions": len(session.post_versions),
+        "stage": session.stage.value,
+        "draft_needs_update": session.draft_needs_update or bool(
+            version and version.context_digest != session_manager.context_digest(session)),
+        "version": version.version if version else None,
+        "source": version.source if version else None,
         "can_undo": session.current_version_index > 0,
         "can_redo": session.current_version_index < len(session.post_versions) - 1,
     }
+
+
+def _post_response(session: SessionState) -> dict:
+    return {"post_text": session.current_post_text,
+            "privacy_flags": _current_privacy_flags(session),
+            "shared_state": _shared_state(session)}
+
+
+@app.get("/api/state/{session_id}")
+def get_state(session_id: str):
+    session = _get_session(session_id)
+    return {**_shared_state(session), **_post_response(session), "session_id": session_id,
+            "post_versions": len(session.post_versions),
+            "enable_tts": settings.enable_tts,
+            "enable_autosave": settings.enable_autosave,
+            "conversation_history": [t.model_dump() for t in session.conversation_history]}
+
+
+@app.post("/api/context")
+def edit_context(req: ContextEditRequest):
+    session = _get_session(req.session_id)
+    if session.context != req.context:
+        for field, value in req.context.model_dump().items():
+            if getattr(session.context, field) != value:
+                session.context_corrections[field] = value
+        session.context = req.context
+        session.draft_needs_update = session.current_post_text is not None
+    session_manager.save(session)
+    return _post_response(session)
 
 
 # --------------------------------------------------------------------------- #
@@ -218,30 +270,33 @@ def _process_turn(session: SessionState, text: str, via_voice: bool) -> TurnResp
         if result.intent == Intent.ANSWER:
             before = session.context.model_copy(deep=True)
             conversation.extract_and_merge(session, text, llm_provider)
+            response.assistant_message = session.last_acknowledgement
             if session.context != before:
+                for field, value in session.context.model_dump().items():
+                    if getattr(before, field) != value and field in session.context_corrections:
+                        session.context_corrections[field] = value
                 session.meaningful_answers += 1
+                session.draft_needs_update = session.current_post_text is not None
             question = conversation.next_question(session)
             response.next_question = question
             response.ready_to_draft = question is None and session.context.has_minimum_content()
-            if question:
-                session.conversation_history.append(ConversationTurn(role="assistant", content=question))
-            elif response.ready_to_draft:
+            if response.ready_to_draft:
                 msg = ("Thank you -- I think I have enough to put together a first draft. "
                        "Say \"write the post\" whenever you're ready, or keep telling me more.")
-                response.assistant_message = msg
-                session.conversation_history.append(ConversationTurn(role="assistant", content=msg))
+                response.assistant_message = (
+                    "I've added that to our notes. Choose Create / update draft when you're ready to use them."
+                    if session.current_post_text is not None else msg)
+
 
         elif result.intent == Intent.SKIP:
             conversation.advance_after_answer(session)
             question = conversation.next_question(session)
             response.next_question = question
-            if question:
-                session.conversation_history.append(ConversationTurn(role="assistant", content=question))
+            response.assistant_message = "Of course. We can leave that out."
 
         elif result.intent == Intent.GO_BACK:
             conversation.go_back(session)
-            question = conversation.next_question(session)
-            response.next_question = question
+            response.next_question = conversation.question_for_stage(session.stage)
 
         elif result.intent == Intent.RESTART:
             fresh = SessionState(session_id=session.session_id)
@@ -268,14 +323,17 @@ def _process_turn(session: SessionState, text: str, via_voice: bool) -> TurnResp
         elif result.intent == Intent.DELETE_INFORMATION:
             instruction = result.instruction or text
             session.context.privacy_constraints.append(instruction)
-            revised = _revise_and_store(session, f"Remove the following as requested: {instruction}")
+            revised = (_revise_and_store(session, f"Remove the following as requested: {instruction}")
+                       if session.current_post_text is not None else None)
             response.post_text = revised
-            response.assistant_message = "Done -- I've removed that."
+            response.assistant_message = ("I've revised the draft to leave that out. Please check the wording."
+                                          if revised is not None else "I'll leave that out of the draft.")
             response.privacy_flags = _current_privacy_flags(session)
 
         elif result.intent == Intent.PRIVACY_REQUEST:
             session.context.privacy_constraints.append(text)
-            response.assistant_message = "Understood -- I'll keep that in mind and won't include it."
+            session.draft_needs_update = session.current_post_text is not None
+            response.assistant_message = "I'll keep that out of future drafts. You can check the privacy preferences on the right."
 
         elif result.intent == Intent.READ_POST:
             if session.current_post_text:
@@ -290,14 +348,12 @@ def _process_turn(session: SessionState, text: str, via_voice: bool) -> TurnResp
         elif result.intent == Intent.UNDO:
             version = session_manager.undo(session)
             response.post_text = version.text if version else session.current_post_text
-            if version is None:
-                response.assistant_message = "There's nothing earlier to undo to."
+            response.assistant_message = "I’ve brought back the previous draft." if version else "There's nothing earlier to undo to."
 
         elif result.intent == Intent.REDO:
             version = session_manager.redo(session)
             response.post_text = version.text if version else session.current_post_text
-            if version is None:
-                response.assistant_message = "There's nothing to redo."
+            response.assistant_message = "I’ve restored that draft." if version else "There's nothing to redo."
 
         elif result.intent in (Intent.SAVE, Intent.COPY):
             response.post_text = session.current_post_text
@@ -313,8 +369,17 @@ def _process_turn(session: SessionState, text: str, via_voice: bool) -> TurnResp
         response.error = ("I couldn't reach the language model just now. Your answers are safely saved -- "
                            "please try again in a moment, or check your LLM_PROVIDER configuration.")
 
+    if result.intent == Intent.RESTART:
+        response.post_text = ""
+    for content in (response.assistant_message, response.next_question):
+        if content:
+            session.conversation_history.append(ConversationTurn(role="assistant", content=content))
+    if result.intent != Intent.STOP_AUDIO and not response.speak:
+        response.speak = " ".join(part for part in
+                                  (response.assistant_message, response.next_question, response.error) if part) or None
     session_manager.save(session)
     response.stage = session.stage.value
+    response.shared_state = _shared_state(session)
     return response
 
 
@@ -348,17 +413,27 @@ async def send_audio(session_id: str = Form(...), file: UploadFile = File(...)):
 
     suffix = os.path.splitext(file.filename or "")[1] or ".webm"
     wav_path = None
+    audio_phase = "conversion"
     try:
-        wav_path = normalize_to_wav(raw_bytes, suffix=suffix)
-        transcript = whisper_transcribe(wav_path)
-    except RuntimeError as exc:
-        logger.error("audio_processing_failed error=%s", exc)
+        wav_path = await run_in_threadpool(normalize_to_wav, raw_bytes, suffix=suffix)
+        audio_phase = "transcription"
+        transcript = await run_in_threadpool(whisper_transcribe, wav_path)
+    except Exception as exc:
+        logger.error("audio_processing_failed error_type=%s", type(exc).__name__)
+        if not shutil.which("ffmpeg"):
+            message = "Recording received, but FFmpeg is missing. In your caringbridge environment run: conda install -c conda-forge ffmpeg. Then restart the app."
+        elif audio_phase == "conversion":
+            message = "Recording received, but the audio could not be decoded. Try a shorter recording or another browser; you can still type."
+        elif isinstance(exc, ImportError):
+            message = "Recording received, but a speech-recognition dependency could not load. Run python -m pip install -r requirements.txt in your caringbridge environment, then restart."
+        else:
+            message = "Recording received, but transcription failed. Check the Whisper model download, STT_DEVICE and STT_COMPUTE_TYPE settings. Try STT_DEVICE=cpu and STT_COMPUTE_TYPE=int8, then restart. You can still type."
         return AudioTurnResponse(
             session_id=session.session_id,
             intent=Intent.UNKNOWN.value,
             confidence=0.0,
             stage=session.stage.value,
-            error="I couldn't transcribe that recording. Your previous responses are still safe.",
+            error=message,
             raw_transcript="",
             clean_transcript="",
             transcript_reliable=False,
@@ -381,7 +456,7 @@ async def send_audio(session_id: str = Form(...), file: UploadFile = File(...)):
             transcript_reliable=False,
         )
 
-    base_response = _process_turn(session, transcript.clean_transcript, via_voice=True)
+    base_response = await run_in_threadpool(_process_turn, session, transcript.clean_transcript, True)
     return AudioTurnResponse(
         **base_response.model_dump(),
         raw_transcript=transcript.raw_transcript,
@@ -402,7 +477,7 @@ def generate(req: SimpleSessionRequest):
     except LLMUnavailableError:
         raise HTTPException(status_code=502, detail="Couldn't generate the draft just now. Your responses have been preserved.")
     session_manager.save(session)
-    return {"post_text": draft, "privacy_flags": _current_privacy_flags(session)}
+    return _post_response(session)
 
 
 @app.post("/api/revise")
@@ -413,7 +488,7 @@ def revise(req: ReviseRequest):
     except LLMUnavailableError:
         raise HTTPException(status_code=502, detail="Couldn't generate the revision just now. Your previous draft is still safe.")
     session_manager.save(session)
-    return {"post_text": revised, "privacy_flags": _current_privacy_flags(session)}
+    return _post_response(session)
 
 
 @app.post("/api/manual-edit")
@@ -421,10 +496,11 @@ def manual_edit(req: ManualEditRequest):
     """Records a manual edit as a new version so the user's own wording is
     preserved and later revisions build on it, not on a stale AI draft."""
     session = _get_session(req.session_id)
-    session_manager.add_version(session, req.text, source="manual_edit")
-    session.manual_edits += 1
+    if session.current_post_text != req.text:
+        session_manager.add_version(session, req.text, source="manual_edit")
+        session.manual_edits += 1
     session_manager.save(session)
-    return {"post_text": req.text, "privacy_flags": _current_privacy_flags(session)}
+    return _post_response(session)
 
 
 @app.post("/api/undo")
@@ -432,7 +508,7 @@ def undo(req: SimpleSessionRequest):
     session = _get_session(req.session_id)
     version = session_manager.undo(session)
     session_manager.save(session)
-    return {"post_text": version.text if version else session.current_post_text}
+    return _post_response(session)
 
 
 @app.post("/api/redo")
@@ -440,7 +516,7 @@ def redo(req: SimpleSessionRequest):
     session = _get_session(req.session_id)
     version = session_manager.redo(session)
     session_manager.save(session)
-    return {"post_text": version.text if version else session.current_post_text}
+    return _post_response(session)
 
 
 @app.post("/api/export")
@@ -452,6 +528,29 @@ def export(req: ExportRequest):
     ext = "md" if req.format == "md" else "txt"
     return PlainTextResponse(text, media_type=f"text/{'markdown' if ext == 'md' else 'plain'}",
                               headers={"Content-Disposition": f'attachment; filename="caringbridge_first_post.{ext}"'})
+
+
+@app.get("/api/diagnostics")
+def diagnostics():
+    """Read-only setup check. Does not record audio or send conversation content."""
+    audio = "FFmpeg found" if shutil.which("ffmpeg") else "FFmpeg missing — voice transcription cannot run"
+    if settings.llm_provider == "ollama":
+        try:
+            with httpx.Client(timeout=4.0) as client:
+                response = client.get(settings.ollama_host.rstrip("/") + "/api/tags")
+                response.raise_for_status()
+                installed = {item.get("name", "") for item in response.json().get("models", [])}
+            wanted = settings.llm_model if ":" in settings.llm_model else settings.llm_model + ":latest"
+            model = (f"Ollama connected; {settings.llm_model} installed (generation not tested)"
+                     if wanted in installed or settings.llm_model in installed
+                     else f"Ollama connected, but {settings.llm_model} is not installed. Run ollama pull {settings.llm_model}")
+        except (httpx.HTTPError, ValueError):
+            model = "Cannot reach Ollama. Open Ollama and check OLLAMA_HOST in .env"
+    elif settings.llm_provider == "openai_compatible":
+        model = "OpenAI-compatible provider configured; connection not tested by this check"
+    else:
+        model = "No language model configured. Set LLM_PROVIDER and LLM_MODEL in .env, then restart"
+    return {"audio": audio, "model": model}
 
 
 @app.get("/health")

@@ -9,6 +9,7 @@ older than settings.session_ttl_minutes.
 from __future__ import annotations
 
 import logging
+import hashlib
 import threading
 import time
 from typing import Dict, Optional
@@ -69,13 +70,18 @@ class SessionManager:
     # -- version history helpers -------------------------------------------------
 
     @staticmethod
+    def context_digest(session: SessionState) -> str:
+        return hashlib.sha256(session.context.model_dump_json().encode()).hexdigest()
+
+    @staticmethod
     def add_version(session: SessionState, text: str, source: str) -> PostVersion:
-        next_version_no = len(session.post_versions) + 1
+        next_version_no = max((v.version for v in session.post_versions), default=0) + 1
         # If the user had undone to an earlier point and now creates a new
         # version, we truncate the "future" (redo) branch -- standard
         # undo/redo semantics.
         session.post_versions = session.post_versions[: session.current_version_index + 1]
-        version = PostVersion(version=next_version_no, text=text, source=source)
+        version = PostVersion(version=next_version_no, text=text, source=source,
+                              context_digest=SessionManager.context_digest(session))
         session.post_versions.append(version)
         session.current_version_index = len(session.post_versions) - 1
         return version

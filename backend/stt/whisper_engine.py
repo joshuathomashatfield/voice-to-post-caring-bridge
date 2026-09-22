@@ -84,9 +84,9 @@ def transcribe(wav_path: str) -> TranscriptResult:
     # confident; very negative is not. Combine with no_speech_prob and
     # transcript length.
     confidence = max(0.0, min(1.0, 1.0 + (avg_logprob / 5.0))) * (1.0 - no_speech_prob)
+    clean_text = _clean_transcript(raw_text)
     is_reliable = (
-        bool(raw_text)
-        and len(raw_text.split()) >= 2
+        bool(re.search(r"\w", clean_text))
         and no_speech_prob < 0.6
         and confidence > 0.35
     )
@@ -96,7 +96,7 @@ def transcribe(wav_path: str) -> TranscriptResult:
 
     return TranscriptResult(
         raw_transcript=raw_text,
-        clean_transcript=_clean_transcript(raw_text),
+        clean_transcript=clean_text,
         confidence=confidence,
         is_reliable=is_reliable,
         no_speech_probability=no_speech_prob,

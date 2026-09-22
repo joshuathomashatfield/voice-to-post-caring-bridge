@@ -1,84 +1,91 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>CaringBridge First-Post Assistant</title>
-<link rel="stylesheet" href="/frontend/styles.css" />
+<link rel="stylesheet" href="/frontend/styles.css?v=micfix-2" />
 </head>
 <body>
 <a class="skip-link" href="#main-content">Skip to main content</a>
-
 <div class="app-shell">
   <header class="app-header">
-    <div>
-      <h1>Your first CaringBridge update</h1>
-      <p>A calm way to put your update into words -- at your own pace.</p>
-    </div>
-    <div class="header-actions">
-      <button type="button" class="btn-quiet" id="clear-session-btn">Clear session</button>
-    </div>
+    <div><h1>Your first CaringBridge update</h1><p>Talk it through. Shape it together. Share when you’re ready.</p></div>
+    <button type="button" class="btn-quiet" id="clear-session-btn" data-action>Clear session</button>
   </header>
-
+  <div class="connection-bar">
+    <span id="connection-status" role="status">Starting the app…</span>
+    <button type="button" id="retry-connection-btn" class="btn-quiet" onclick="location.reload()">Retry connection</button>
+    <button type="button" id="check-connection-btn" class="btn-quiet">Check audio / model</button>
+  </div>
+  <p id="startup-error" class="startup-error" role="alert" hidden></p>
+  <p id="diagnostics" role="status"></p>
+  <script>
+    window.showStartupError = function(message) {
+      var box = document.getElementById('startup-error');
+      box.hidden = false;
+      box.textContent = message + ' Try Ctrl+F5 to reload all files. If it persists, copy this message.';
+    };
+    window.addEventListener('error', function(event) {
+      window.showStartupError('Interface error: ' + (event.message || 'A page file could not load.'));
+    });
+    window.addEventListener('unhandledrejection', function(event) {
+      window.showStartupError('Interface error: ' + (event.reason && event.reason.message || 'An operation failed.'));
+    });
+    setTimeout(function() {
+      if (document.documentElement.dataset.appReady !== 'true') {
+        window.showStartupError('The interface has not connected to the session yet.');
+      }
+    }, 15000);
+  </script>
   <main id="main-content">
     <section class="card conversation-card" aria-label="Conversation">
-      <h2>Let's talk it through</h2>
-
+      <div class="section-heading"><h2>Let’s talk it through</h2><span id="stage-label" class="badge">Getting started</span></div>
+      <div class="speech-settings">
+        <label><input type="checkbox" id="speak-replies" checked /> Speak replies</label>
+        <label>Voice <select id="voice-select" aria-label="Speaking voice"></select></label>
+        <label>Speed <select id="speech-rate"><option value="0.85">Gentle</option><option value="1" selected>Natural</option><option value="1.12">Faster</option></select></label>
+      </div>
+      <div class="speech-actions"><button type="button" id="hear-reply-btn" class="btn-ghost">Hear last reply</button><button type="button" id="stop-listen-btn" class="btn-ghost" hidden>Stop speaking</button><span id="speech-status" role="status"></span></div>
       <div id="transcript" role="log" aria-live="polite" aria-label="Conversation history"></div>
-
-      <div class="input-row">
-        <div class="text-input-wrap">
-          <label for="typed-input" class="visually-hidden">Type your response</label>
-          <textarea id="typed-input" rows="1" placeholder="Or type your response..."></textarea>
-          <button type="button" class="btn-primary" id="send-btn">Send</button>
-        </div>
+      <div class="quick-actions"><button type="button" id="skip-btn" class="btn-quiet" data-action>Skip this question</button><button type="button" id="back-btn" class="btn-quiet" data-action>Go back</button></div>
+      <div class="text-input-wrap"><label for="typed-input" class="visually-hidden">Type your response or ask for a change</label><textarea id="typed-input" rows="2" placeholder="Tell me more, or ask for a change…"></textarea><button type="button" class="btn-primary" id="send-btn" data-action disabled>Send</button></div>
+      <div class="mic-settings">
+        <label>Microphone <select id="mic-select"><option value="">System default</option></select></label>
+        <button type="button" id="test-mic-btn" class="btn-ghost">Test microphone</button>
+        <label><input id="auto-send" type="checkbox" /> Send after a pause</label>
       </div>
-
-      <div class="control-bar">
-        <button type="button" class="mic-button" id="mic-btn" data-state="idle" aria-pressed="false">
-          <span class="mic-dot" aria-hidden="true"></span>
-          <span id="mic-label">Speak</span>
-        </button>
-        <span id="mic-status" role="status" aria-live="polite"></span>
-      </div>
+      <meter id="mic-level" min="0" max="1" value="0" aria-label="Microphone input level"></meter>
+      <div class="control-bar"><button type="button" class="mic-button" id="mic-btn" disabled data-state="idle" aria-pressed="false"><span class="mic-dot" aria-hidden="true"></span><span id="mic-label">Record</span></button><span id="mic-status" role="status">Mic off</span></div>
+      <audio id="mic-preview" controls hidden aria-label="Local microphone test recording"></audio>
       <canvas id="waveform" width="600" height="36" aria-hidden="true"></canvas>
     </section>
-
-    <section class="card post-card" id="post-card" aria-label="Your post">
-      <h2>Your post</h2>
-      <div class="confirmation-banner">
-        Your post is ready to review. Nothing is shared or published automatically --
-        read it over, change anything you'd like, or ask for a revision.
-      </div>
+    <section class="card post-card visible" id="post-card" aria-label="Shared understanding and post">
+      <div class="section-heading"><h2>Our working draft</h2><span id="version-label" class="badge">No draft yet</span></div>
+      <details id="shared-context" open>
+        <summary>What I’ve understood <span id="context-count">0 topics shared</span></summary>
+        <p class="helper">These are the notes used to write your post. Check names, correct anything I misunderstood, or remove details. Blank topics can stay blank.</p>
+        <div id="context-fields"></div>
+        <div class="context-actions"><button type="button" id="save-context-btn" class="btn-ghost" data-action>Save corrections</button><span id="context-status" role="status"></span></div>
+      </details>
+      <div class="confirmation-banner">Only a draft. Review the wording before sharing; nothing is published automatically.</div>
+      <p id="draft-stale" role="status" hidden>Your notes changed. Choose “Create / update draft” to use them, then review the result.</p>
       <label for="post-textarea" class="visually-hidden">Editable CaringBridge post draft</label>
-      <textarea id="post-textarea" spellcheck="true"></textarea>
-
-      <div id="privacy-flags" class="privacy-flags" hidden>
-        <strong>A couple of things to double-check before sharing:</strong>
-        <ul id="privacy-flags-list"></ul>
-      </div>
-
+      <textarea id="post-textarea" spellcheck="true" placeholder="Your draft will appear here. You can also start writing directly."></textarea>
+      <div id="privacy-flags" class="privacy-flags" hidden><strong>Double-check before sharing:</strong><ul id="privacy-flags-list"></ul></div>
       <div class="post-toolbar" role="group" aria-label="Post actions">
-        <button type="button" class="btn-ghost" id="listen-btn">Listen</button>
-        <button type="button" class="btn-ghost" id="stop-listen-btn" hidden>Stop</button>
-        <button type="button" class="btn-ghost" id="undo-btn">Undo</button>
-        <button type="button" class="btn-ghost" id="redo-btn">Redo</button>
-        <button type="button" class="btn-ghost" id="regenerate-btn">Regenerate</button>
-        <button type="button" class="btn-ghost" id="restart-btn">Start over</button>
+        <button type="button" class="btn-primary" id="regenerate-btn" data-action>Create / update draft</button>
+        <button type="button" class="btn-ghost" id="listen-btn">Read draft</button>
+        <button type="button" class="btn-ghost" id="undo-btn" data-action>Undo</button>
+        <button type="button" class="btn-ghost" id="redo-btn" data-action>Redo</button>
         <button type="button" class="btn-ghost" id="copy-btn">Copy</button>
         <button type="button" class="btn-ghost" id="save-txt-btn">Download .txt</button>
         <button type="button" class="btn-ghost" id="save-md-btn">Download .md</button>
       </div>
-      <p class="status-line" id="post-status" role="status" aria-live="polite"></p>
     </section>
   </main>
-
-  <footer class="app-footer">
-    Nothing you write here is sent to CaringBridge automatically. You stay in control of what's shared.
-  </footer>
+  <p class="status-line" id="post-status" role="status" aria-live="polite"></p>
+  <footer class="app-footer">You decide what to share. “On device” voices use local speech; “online” voices may send text to your browser’s voice service. Draft recovery stays in this browser tab.</footer>
 </div>
-
-<script src="/frontend/audio.js"></script>
-<script src="/frontend/app.js"></script>
+<script src="/frontend/audio.js?v=micfix-2" onerror="window.showStartupError('Could not load audio.js.')"></script><script src="/frontend/speech.js?v=micfix-2" onerror="window.showStartupError('Could not load speech.js.')"></script><script src="/frontend/app.js?v=micfix-2" onerror="window.showStartupError('Could not load app.js.')"></script>
 </body>
 </html>

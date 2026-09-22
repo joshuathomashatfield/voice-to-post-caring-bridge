@@ -4,8 +4,8 @@ free-text answer into structured PostContext fields.
 
 The question SEQUENCE is fixed and small (this is a conversation, not a
 survey), but any stage is skipped automatically once enough information for
-it already exists -- see `next_question`. The LLM is used only to extract
-structured facts from what the user actually said; it is never allowed to
+it already exists -- see `next_question`. The LLM extracts
+structured facts and a short spoken acknowledgement from what the user said; it is never allowed to
 invent a stage outside this predefined set (see MASTER PROMPT section 21).
 """
 from __future__ import annotations
@@ -35,7 +35,7 @@ _QUESTIONS = {
         "and family to know about why you're creating this page?"
     ),
     QuestionStage.CURRENT_SITUATION: (
-        "Thank you. What's been happening recently, or what's the current situation?"
+        "What's been happening recently?"
     ),
     QuestionStage.HOW_DOING: (
         "How are things going right now, generally speaking?"
@@ -71,7 +71,7 @@ information the user did not state. If something wasn't mentioned, leave it null
 or as an empty list.
 
 Return ONLY minified JSON (no markdown fences, no commentary) matching exactly:
-{"person": str|null, "relationship": str|null, "reason_for_page": str|null,
+{"acknowledgement": str|null, "person": str|null, "relationship": str|null, "reason_for_page": str|null,
 "current_situation": str|null, "current_status": str|null,
 "important_updates": [str], "support_requests": [str],
 "communication_preferences": str|null, "tone": str|null,
@@ -81,6 +81,14 @@ Only fill fields that are actually supported by the user's message. Do not
 diagnose medical conditions, guess prognosis, or assume religious/emotional
 content. If the user asks to omit or not mention something, put a short
 description of it in "privacy_constraints".
+
+Also write an acknowledgement to speak directly to the user: one brief,
+natural sentence (at most 25 words) responding to what they just told you.
+Use everyday language and contractions. Don't ask a question; the app supplies
+the next question. Don't repeat sensitive names or medical details. Don't assume
+feelings or promise outcomes. Avoid stock praise, forced optimism, "noted", and
+claims that you have already changed the draft. If they ask what a question
+means, briefly explain it without treating that question as a fact.
 """
 
 
@@ -112,6 +120,8 @@ def next_question(session: SessionState) -> Optional[str]:
             continue
         break
 
+    if session.stage != stage:
+        session.stage_history.append(session.stage)
     session.stage = stage
     if stage == QuestionStage.READY_TO_DRAFT or stage == QuestionStage.DONE:
         return None
@@ -135,11 +145,13 @@ def go_back(session: SessionState) -> None:
 def extract_and_merge(session: SessionState, user_text: str, llm: LLMProvider) -> Tuple[PostContext, bool]:
     """Extract structured info from the user's answer and merge it into the
     session's PostContext. Returns (context, extraction_succeeded)."""
+    session.last_acknowledgement = None
     try:
         raw = llm.generate([
             {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
             {"role": "user", "content": (
                 f"Current question stage: {session.stage.value}\n"
+                f"Recent conversation: {json.dumps([t.model_dump(include={'role', 'content'}) for t in session.conversation_history[-5:]])}\n"
                 f"User said: {user_text}"
             )},
         ], temperature=0.1)
@@ -150,58 +162,29 @@ def extract_and_merge(session: SessionState, user_text: str, llm: LLMProvider) -
         extracted = ExtractedInfo(**data)
     except (LLMUnavailableError, json.JSONDecodeError, ValidationError, Exception) as exc:  # noqa: BLE001
         logger.warning("extraction_failed stage=%s error=%s", session.stage, exc)
-        return _fallback_merge(session, user_text), False
+        # Keep uncertain extraction visibly unorganized; don't silently turn
+        # a clarification or a failed model response into a medical fact.
+        if user_text.strip() not in session.context.additional_notes:
+            session.context.additional_notes.append(user_text.strip())
+        session.last_acknowledgement = "I've kept your words in the notes so you can check them."
+        return session.context, False
 
     ctx = session.context
+    acknowledgement = (extracted.acknowledgement or "").strip()
+    if acknowledgement and len(acknowledgement.split()) <= 40 and "?" not in acknowledgement:
+        session.last_acknowledgement = acknowledgement
     for field in ("person", "relationship", "reason_for_page", "current_situation",
                   "current_status", "communication_preferences", "tone"):
         value = getattr(extracted, field)
         if value:
             setattr(ctx, field, value)
-    ctx.important_updates.extend(extracted.important_updates)
-    ctx.support_requests.extend(extracted.support_requests)
-    ctx.privacy_constraints.extend(extracted.privacy_constraints)
-    ctx.additional_notes.extend(extracted.additional_notes)
-
-    if not _extraction_touched_current_stage(session.stage, extracted):
-        _fallback_merge(session, user_text)
+    for field in ("important_updates", "support_requests", "privacy_constraints", "additional_notes"):
+        target = getattr(ctx, field)
+        target.extend(value for value in getattr(extracted, field) if value not in target)
 
     return ctx, True
 
 
-def _extraction_touched_current_stage(stage: QuestionStage, extracted: ExtractedInfo) -> bool:
-    mapping = {
-        QuestionStage.OPENING: bool(extracted.reason_for_page or extracted.person or extracted.relationship),
-        QuestionStage.CURRENT_SITUATION: bool(extracted.current_situation or extracted.important_updates),
-        QuestionStage.HOW_DOING: bool(extracted.current_status or extracted.important_updates),
-        QuestionStage.SUPPORT: bool(extracted.support_requests),
-        QuestionStage.COMMUNICATION: bool(extracted.communication_preferences),
-        QuestionStage.CLOSING_TONE: bool(extracted.tone),
-    }
-    return mapping.get(stage, True)
-
-
-def _fallback_merge(session: SessionState, user_text: str) -> PostContext:
-    """If structured extraction fails or misses the current stage entirely,
-    fall back to storing the raw answer directly in the field the current
-    question was aimed at, so no information is silently lost."""
-    ctx = session.context
-    stage = session.stage
-    text = user_text.strip()
-    if not text:
-        return ctx
-    if stage == QuestionStage.OPENING and not ctx.reason_for_page:
-        ctx.reason_for_page = text
-    elif stage == QuestionStage.CURRENT_SITUATION and not ctx.current_situation:
-        ctx.current_situation = text
-    elif stage == QuestionStage.HOW_DOING and not ctx.current_status:
-        ctx.current_status = text
-    elif stage == QuestionStage.SUPPORT:
-        ctx.support_requests.append(text)
-    elif stage == QuestionStage.COMMUNICATION and not ctx.communication_preferences:
-        ctx.communication_preferences = text
-    elif stage == QuestionStage.CLOSING_TONE and not ctx.tone:
-        ctx.tone = text
-    else:
-        ctx.additional_notes.append(text)
-    return ctx
+def question_for_stage(stage: QuestionStage) -> Optional[str]:
+    """Repeat a previous question without skipping its already-filled field."""
+    return _QUESTIONS.get(stage)

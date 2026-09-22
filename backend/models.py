@@ -86,6 +86,7 @@ class ExtractedInfo(BaseModel):
     """Shape the LLM must return when extracting information from a user
     utterance. Validated before being merged into PostContext."""
 
+    acknowledgement: Optional[str] = None
     person: Optional[str] = None
     relationship: Optional[str] = None
     reason_for_page: Optional[str] = None
@@ -100,6 +101,7 @@ class ExtractedInfo(BaseModel):
 
 
 class PostVersion(BaseModel):
+    context_digest: str = ""
     version: int
     text: str
     timestamp: float = Field(default_factory=time.time)
@@ -148,6 +150,9 @@ class SessionState(BaseModel):
     manual_edits: int = 0
     undo_actions: int = 0
     used_tts: bool = False
+    context_corrections: dict = Field(default_factory=dict)
+    last_acknowledgement: Optional[str] = None
+    draft_needs_update: bool = False
 
     def touch(self) -> None:
         self.updated_at = time.time()

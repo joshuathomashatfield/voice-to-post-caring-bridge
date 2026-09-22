@@ -60,12 +60,15 @@ def normalize_to_wav(raw_bytes: bytes, suffix: str = ".webm") -> str:
             timeout=30,
         )
     except FileNotFoundError as exc:
-        cleanup_temp_files(input_path)
+        cleanup_temp_files(input_path, output_path)
         raise RuntimeError("ffmpeg is required but was not found on PATH.") from exc
     except subprocess.CalledProcessError as exc:
-        cleanup_temp_files(input_path)
+        cleanup_temp_files(input_path, output_path)
         logger.error("ffmpeg_failed stderr=%s", exc.stderr.decode(errors="ignore")[:500])
         raise RuntimeError("Could not process the audio recording.") from exc
+    except subprocess.TimeoutExpired as exc:
+        cleanup_temp_files(input_path, output_path)
+        raise RuntimeError("Audio conversion timed out. Try a shorter recording.") from exc
     finally:
         cleanup_temp_files(input_path)
 

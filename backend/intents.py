@@ -23,7 +23,7 @@ logger = logging.getLogger("caringbridge.intents")
 # Ordered rule list: (compiled pattern, intent, confidence)
 _RULES = [
     (re.compile(r"^\s*(skip|pass|next question|i(?:'d)? rather not)\s*$", re.I), Intent.SKIP, 0.95),
-    (re.compile(r"\b(i don'?t know|not sure|no idea)\b", re.I), Intent.SKIP, 0.7),
+    (re.compile(r"^\s*(i don'?t know|not sure|no idea)[.!?]?\s*$", re.I), Intent.SKIP, 0.7),
     (re.compile(r"\bgo back\b|\bprevious question\b|\bback up\b", re.I), Intent.GO_BACK, 0.9),
     (re.compile(r"\bstart over\b|\brestart\b|\bstart again\b|\bclear everything\b", re.I), Intent.RESTART, 0.95),
     (re.compile(r"\b(write|generate|create|draft)\s+(the|my|a)?\s*post\b", re.I), Intent.GENERATE_POST, 0.9),

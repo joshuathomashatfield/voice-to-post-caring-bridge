@@ -11,7 +11,6 @@
             text, a fixed (not floating) control bar for voice input.
    --------------------------------------------------------------------- */
 
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Work+Sans:wght@400;500;600;700&display=swap');
 
 :root {
   --color-bg: #FAF7F1;
@@ -358,7 +357,6 @@ textarea, input[type="text"] {
   color: #6B3A22;
   font-size: 0.9rem;
 }
-:root[data-theme="dark"] .privacy-flags,
 @media (prefers-color-scheme: dark) {
   .privacy-flags { background: #3A2A22; color: #F0CBB5; }
 }
@@ -398,3 +396,64 @@ footer.app-footer {
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
+
+/* Shared workspace: conversation and its editable representation stay together. */
+[hidden] { display: none !important; }
+.app-shell { max-width: 1800px; padding: 24px 32px 12px; gap: 16px; }
+#main-content { display: grid; grid-template-columns: minmax(340px, 0.85fr) minmax(440px, 1.15fr); gap: 22px; min-height: 0; }
+.conversation-card { display: flex; flex-direction: column; min-height: 0; }
+#transcript { flex: 1; max-height: none; min-height: 180px; margin-top: 16px; }
+.turn { white-space: pre-wrap; }
+.turn-label { display: block; font-size: .72rem; margin-bottom: 4px; opacity: .8; }
+.section-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.badge { font-size: .78rem; color: var(--color-ink-soft); }
+.speech-settings, .speech-actions, .context-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: .84rem; }
+.speech-settings label { display: flex; align-items: center; gap: 5px; }
+.speech-actions { margin-top: 10px; }
+select { max-width: 210px; padding: 6px; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-bg); color: var(--color-ink); font: inherit; }
+#speech-status { font-size: .8rem; }
+.control-bar { margin-top: 12px; justify-content: center; border-top: 1px solid var(--color-border); padding-top: 14px; }
+#typed-input { min-width: 0; }
+.post-card.visible { display: flex; flex-direction: column; min-height: 0; gap: 12px; }
+#shared-context { border: 1px solid var(--color-border); border-radius: 12px; padding: 10px 14px; }
+summary { cursor: pointer; font-weight: 600; }
+#context-count { font-weight: 400; font-size: .8rem; margin-left: 8px; color: var(--color-ink-soft); }
+.helper { color: var(--color-ink-soft); font-size: .84rem; margin: 8px 0; }
+#context-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; max-height: 180px; overflow: auto; padding: 4px; }
+.context-field { display: flex; flex-direction: column; font-size: .78rem; gap: 4px; }
+.context-field textarea { width: 100%; font-size: .88rem; resize: vertical; }
+.context-actions { margin-top: 10px; }
+#draft-stale { margin: 0; padding: 8px; background: var(--color-surface-alt); font-size: .85rem; border-radius: 8px; }
+#post-textarea { flex: 1; min-height: 180px; resize: none; }
+.post-toolbar { margin-top: 0; gap: 6px; }
+.post-toolbar button, .speech-actions button { padding: 7px 12px; font-size: .83rem; }
+.confirmation-banner { padding: 8px 12px; font-size: .83rem; }
+.privacy-flags { max-height: 100px; overflow: auto; margin-top: 0; }
+.status-line { margin: 0; min-height: 22px; }
+footer.app-footer { padding: 0; font-size: .75rem; }
+@media (min-width: 1000px) and (min-height: 900px) {
+  .app-shell { height: 100dvh; }
+  #main-content { flex: 1; overflow: hidden; }
+}
+@media (max-width: 999px), (max-height: 899px) {
+  #transcript { height: 350px; flex: auto; }
+  #post-textarea { min-height: 320px; }
+}
+@media (max-width: 999px) {
+  #main-content { grid-template-columns: minmax(0, 1fr); }
+  .app-shell { padding: 16px; }
+}
+@media (max-width: 480px) { #context-fields { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+.connection-bar, .mic-settings { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:.83rem; }
+.connection-bar { margin-top:-6px; }
+.mic-settings { margin-top:10px; }
+.mic-settings label { display:flex; align-items:center; gap:5px; }
+#mic-select { max-width:230px; }
+#mic-level { display:block; width:100%; height:12px; margin-top:8px; }
+#mic-status { flex:1; min-width:180px; }
+#mic-preview { width:100%; height:34px; margin-top:8px; }
+.startup-error { border:1px solid var(--color-warn); background:#fff0e8; color:#542816; padding:12px; margin:0; border-radius:10px; }
+#diagnostics { margin:0; font-size:.85rem; }
+#diagnostics:empty { display:none; }

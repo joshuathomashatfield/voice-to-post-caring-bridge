@@ -5,6 +5,10 @@ first CaringBridge health-update post through a short conversation, using
 speech-to-text, a local or self-hosted LLM, and text-to-speech -- while
 keeping the person in full control of the final wording.
 
+See **MICROPHONE_SEND_FIX.md** for the Record/Send troubleshooting patch.
+See **UPDATE_NOTES.md** for the shared workspace and spoken conversation changes,
+validation results, and remaining limitations. `requirements.txt` is unchanged.
+
 This is a research-prototype-quality build: it is meant to be run and used,
 not just read.
 
@@ -70,8 +74,7 @@ caringbridge_assistant/
   inventing facts, and both drafting and revision are instructed to use only
   what's in `PostContext` / the existing post text.
 - **Rules first, LLM second, for intent classification.** Obvious commands
-  ("skip", "undo", "start over") are matched with regexes so they're instant
-  and 100% reliable; only ambiguous phrasing falls through to the LLM
+  ("skip", "undo", "start over") are matched with regexes so they are fast; rule matching can still misinterpret phrasing, and only ambiguous phrasing falls through to the LLM
   classifier. Destructive intents (`RESTART`, `UNDO`, `REDO`,
   `DELETE_INFORMATION`) require a higher confidence threshold before being
   acted on (see `backend/intents.py::is_actionable`).
@@ -89,7 +92,7 @@ caringbridge_assistant/
   can't get into an inconsistent state or double-record.
 - **Privacy by default.** Temporary audio files are deleted immediately after
   transcription. Sessions live in memory only (never written to disk) and
-  expire automatically (`SESSION_TTL_MINUTES`). A "Clear session" control
+  can be removed by the session sweep helper (`SESSION_TTL_MINUTES`); the original app does not schedule this helper automatically. A "Clear session" control
   wipes everything for the current session on demand. Generated/edited posts
   are scanned for likely sensitive details (phone numbers, addresses, IDs)
   and flagged to the user before they'd share them.
@@ -204,15 +207,14 @@ against the safe `NullProvider` fallback (so tests run without a live LLM).
 - **Intent classification** for very unusual phrasing may fall through to
   `UNKNOWN` and ask the user to rephrase, rather than guessing.
 - **Structured extraction** relies on the configured LLM returning valid
-  JSON; a deterministic fallback stores the raw answer directly in the
-  relevant field if that ever fails, so no information is silently lost, but
-  it may be less well-organized than LLM-extracted facts.
+  JSON; a deterministic fallback stores the raw answer in the visible notes when
+  extraction fails, so it can be checked instead of guessed into a fact field.
 - **Privacy scanning** is a heuristic regex-based safety net (phone numbers,
   emails, street addresses, ID-like numbers), not a guarantee -- it will miss
   things and occasionally over-flag.
 - **Session storage is in-memory only** (by design, for privacy) -- restarting
   the server clears all active sessions. `SESSION_TTL_MINUTES` controls how
-  long an idle session is kept before automatic cleanup.
+  the cutoff used by the sweep helper; an automatic sweep scheduler is not currently wired up.
 - **Server-side TTS engines** (`pyttsx3`, Piper) are implemented but not the
   default; they're best-effort abstractions for contexts where browser TTS
   isn't suitable, and haven't been tuned for voice quality.
@@ -240,3 +242,41 @@ against the safe `NullProvider` fallback (so tests run without a live LLM).
    post typically contains.
 5. Internationalization: the question bank, system prompts, and STT language
    are currently English-only (`STT_LANGUAGE=en`).
+
+## Shared workspace and conversation controls
+
+- **What I’ve understood** shows the same structured notes used by the model.
+  Correct any field directly; use one item per line for lists. Save corrections,
+  or send a message/create a draft to save them first. Removing a note records a
+  correction for later drafting; it does not erase the earlier transcript or
+  version history. Clear session removes that session from the server.
+- **Create / update draft** is always visible. Notes never silently rewrite your
+  draft; a notice tells you when notes changed. Undo/redo affects draft text only.
+- **Speak replies** is on by default. Use **Hear last reply** to hear the opening
+  message or to retry playback if your browser requires a direct click. Select
+  a voice and speed. Press **Stop speaking**, or **Record**, to interrupt.
+- The microphone stays off until you press **Record**. Press **Finish & send**
+  to submit it. Optional **Send after a pause** uses about 1.8 seconds of silence.
+  **Test microphone** records a local playback sample without sending it to the model. This is turn-based
+  conversation, not continuous listening or streaming audio.
+- Conversation acknowledgements are generated with the existing extraction
+  request. The application still chooses the next question from its question
+  bank, skipping topics already covered.
+- Draft edits are saved before a message, generation, correction, or undo/redo.
+  If saving fails, the next action stops and your text stays in the editor.
+- Recovery uses **sessionStorage in the current browser tab**, not indefinite
+  localStorage. Reloading can reconnect to a live session. If the server restarts,
+  only the tab’s cached draft can be restored; the old conversation and notes are
+  unavailable. Download your draft before closing the tab.
+
+Browser voices labeled **on device** use local speech; **online** voices may use
+browser-vendor services. The app prefers a local English voice when one exists.
+This release does not add a neural TTS service or promise human-level voice
+quality. `TTS_ENGINE` still does not select the frontend playback engine; the
+frontend uses browser speech and honors `ENABLE_TTS`.
+
+Additional speech queue checks (optional developer test; no npm installation):
+
+```bash
+node --test tests/test_speech.cjs
+```
