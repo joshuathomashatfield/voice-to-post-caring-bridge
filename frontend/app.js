@@ -10,7 +10,7 @@
     tone: 'Tone', privacy_constraints: 'Keep out of the post', additional_notes: 'Other notes / words to check',
   };
   const listFields = new Set(['important_updates', 'support_requests', 'privacy_constraints', 'additional_notes']);
-  let sessionId = null, busy = false, recorder = null, settings = {};
+  let sessionId = null, clientState = null, busy = false, recorder = null, settings = {};
   let shared = {}, contextDirty = false, lastKnownPost = '', editTimer = null;
   let savePromise = Promise.resolve(), latestReply = '', voices = [];
   const storage = {
@@ -28,19 +28,33 @@
   function status(message) { $('post-status').textContent = message || ''; }
   async function request(path, body) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), path.includes("session") || path.includes("state/") ? 12000 : 180000);
+    const timeout = setTimeout(() => controller.abort(), path.includes("session") || path.includes("state") ? 12000 : 180000);
     try {
-    const response = await fetch(path, body === undefined ? {signal:controller.signal} : {
-      signal:controller.signal, method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
-    });
-    const data = await response.json();
-    if (!response.ok) { const error = new Error(typeof data.detail === 'string' ? data.detail : 'That request could not be completed. Please try again.'); error.status = response.status; throw error; }
-    return data;
+      let payload = body;
+      if (payload !== undefined && sessionId && clientState && !Object.prototype.hasOwnProperty.call(payload, 'client_state')) {
+        payload = {...payload, client_state: clientState};
+      }
+      const response = await fetch(path, payload === undefined ? {signal:controller.signal} : {
+        signal:controller.signal, method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (data.client_state) { clientState = data.client_state; storage.set('cb_client_state', JSON.stringify(clientState)); }
+      if (!response.ok) {
+        const error = new Error(typeof data.detail === 'string' ? data.detail : 'That request could not be completed. Please try again.');
+        error.status = response.status;
+        throw error;
+      }
+      if (data.client_state) {
+        clientState = data.client_state;
+        storage.set('cb_client_state', JSON.stringify(clientState));
+      }
+      return data;
     } catch (error) {
-      if (error.name === 'AbortError') throw new Error('The server is taking too long. Check the Python terminal and model connection; your text is still here.');
+      if (error.name === 'AbortError') throw new Error('The server is taking too long. Check the model connection; your text is still here.');
       throw error;
     } finally { clearTimeout(timeout); }
   }
+
   function appendTurn(role, content, viaVoice = false) {
     if (!content) return;
     const div = document.createElement('div');
@@ -184,22 +198,34 @@
   }
   async function initSession() {
     busy = true; updateControls();
-    $('connection-status').textContent = 'Connecting to the local app…';
+    $('connection-status').textContent = 'Connecting to the app…';
     try {
       const previous = storage.get('cb_session_id');
+      const savedState = storage.get('cb_client_state');
       let data;
-      if (previous) {
-        try { data = await request(`/api/state/${previous}`); sessionId = previous; }
-        catch (error) {
-          if (error.status !== 404) throw error;
-          // Do not silently discard the cached draft when the server restarted.
+      if (previous && savedState) {
+        try {
+          clientState = JSON.parse(savedState);
+          sessionId = previous;
+          data = await request('/api/state', {session_id: previous, client_state: clientState});
+        } catch (error) {
+          clientState = null;
+          sessionId = null;
+          storage.remove('cb_client_state');
+          if (error.status && error.status !== 400 && error.status !== 404) throw error;
           const cached = storage.get(`cb_draft_${previous}`);
-          if (cached) { $('post-textarea').value = cached; status('Recovered your draft in this tab. Please review the shared facts before generating again.'); }
+          if (cached) {
+            $('post-textarea').value = cached;
+            status('Recovered your draft in this tab. A fresh conversation session was started.');
+          }
         }
       }
       if (!data) {
         data = await request('/api/session', {});
         sessionId = data.session_id;
+        clientState = data.client_state;
+        storage.set('cb_session_id', sessionId);
+        storage.set('cb_client_state', JSON.stringify(clientState));
         latestReply = `${data.welcome_message} ${data.first_question || ''}`;
         appendTurn('assistant', latestReply);
       } else {
@@ -211,21 +237,23 @@
       $('speak-replies').disabled = !settings.enable_tts || !window.speechSynthesis;
       if ($('speak-replies').disabled) $('speak-replies').checked = false;
       storage.set('cb_session_id', sessionId);
+      storage.set('cb_client_state', JSON.stringify(clientState));
       const cached = storage.get(`cb_draft_${sessionId}`);
       if (cached !== null) $('post-textarea').value = cached;
       await flushDraft();
-      const state = await request(`/api/state/${sessionId}`);
+      const state = await request('/api/state', {session_id:sessionId});
       applyResponse(state, {talk:false});
-      $('connection-status').textContent = 'App connected · ready to type or record';
+      $('connection-status').textContent = 'App connected · session stored in this browser tab';
       $('startup-error').hidden = true;
       document.documentElement.dataset.appReady = 'true';
     } catch (error) {
       $('connection-status').textContent = 'Session connection failed';
       window.showStartupError(`Could not open the session. ${error.message}`);
-      status('Click Retry connection after checking that python app.py is still running.');
+      status('Click Retry connection. If this is the hosted version, check the deployment configuration if the problem continues.');
     }
     finally { busy = false; updateControls(); }
   }
+
   async function sendTyped(text = $('typed-input').value.trim()) {
     if (!text) { status('Type a message, or click Record to speak.'); return; }
     status('Sending your message…');
@@ -242,10 +270,12 @@
       status('Listening to your recording and preparing a reply…');
       const form = new FormData();
       form.append('session_id', sessionId);
+      form.append('client_state', JSON.stringify(clientState));
       const ext = blob.type.includes('mp4') ? 'mp4' : blob.type.includes('ogg') ? 'ogg' : 'webm';
       form.append('file', blob, `turn.${ext}`);
       const response = await fetch('/api/audio', {method:'POST', body:form});
       const data = await response.json();
+      if (data.client_state) { clientState = data.client_state; storage.set('cb_client_state', JSON.stringify(clientState)); }
       if (!response.ok) throw new Error(data.detail || 'Could not process the recording.');
       if (data.transcript_reliable) appendTurn('user', data.clean_transcript, true);
       $('mic-status').textContent = data.transcript_reliable ? 'Mic off · transcription received' : 'Mic off · recording needs attention';
@@ -351,11 +381,11 @@
     action(async () => {
       clearTimeout(editTimer); await savePromise.catch(() => {});
       await request('/api/clear', {session_id:sessionId});
-      storage.remove(`cb_draft_${sessionId}`); storage.remove('cb_session_id');
+      storage.remove(`cb_draft_${sessionId}`); storage.remove('cb_session_id'); storage.remove('cb_client_state');
       $('transcript').replaceChildren(); $('post-textarea').value = ''; lastKnownPost = '';
       contextDirty = false; shared = {}; status(''); $('context-status').textContent = '';
       $('privacy-flags').hidden = true;
-      sessionId = null; await initSession();
+      sessionId = null; clientState = null; await initSession();
     }, {flush:false});
   };
   $('hear-reply-btn').onclick = () => speak(latestReply, true);

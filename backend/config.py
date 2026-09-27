@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     debug: bool = False
 
     # --- STT ---
+    stt_provider: str = "local"          # local | groq
     stt_model: str = "small.en"          # tiny.en | base.en | small.en | medium.en | large-v3
     stt_device: str = "cpu"              # cpu | cuda
     stt_compute_type: str = "int8"       # int8 for cpu, float16 for cuda is typical
@@ -27,6 +28,12 @@ class Settings(BaseSettings):
     trailing_silence_seconds: float = 1.2
     max_recording_seconds: int = 120
     stt_language: str = "en"
+    stt_request_timeout: float = 60.0
+
+    # --- Groq (hosted LLM + STT) ---
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_stt_model: str = "whisper-large-v3-turbo"
 
     # --- TTS ---
     enable_tts: bool = True
@@ -34,7 +41,7 @@ class Settings(BaseSettings):
     piper_voice_path: str = ""           # path to a piper .onnx voice model, if tts_engine=piper
 
     # --- LLM ---
-    llm_provider: str = "ollama"         # ollama | openai_compatible | none
+    llm_provider: str = "ollama"         # ollama | groq | openai_compatible | none
     llm_model: str = "qwen3:8b"
     ollama_host: str = "http://localhost:11434"
     openai_compatible_base_url: str = "https://api.openai.com/v1"
@@ -43,6 +50,9 @@ class Settings(BaseSettings):
     llm_request_timeout: float = 60.0
 
     # --- Session / privacy ---
+    # "client" is Vercel-safe: the browser owns SessionState and sends it
+    # with each request. "memory" is kept for local development/tests.
+    session_backend: str = "client"       # client | memory
     enable_autosave: bool = True
     enable_research_mode: bool = False
     session_ttl_minutes: int = 240

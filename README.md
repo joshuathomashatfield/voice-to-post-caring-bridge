@@ -280,3 +280,15 @@ Additional speech queue checks (optional developer test; no npm installation):
 ```bash
 node --test tests/test_speech.cjs
 ```
+
+---
+
+## Vercel + Groq deployment
+
+A serverless deployment profile is included in this version. See
+[`VERCEL_DEPLOY.md`](VERCEL_DEPLOY.md) for the exact deployment steps.
+
+The hosted profile uses Groq for chat + Whisper transcription, browser
+SpeechSynthesis for TTS, with browser-owned session state for Vercel continuity
+across Vercel function instances. The original local Ollama / faster-whisper
+path remains available through `requirements-local.txt`.

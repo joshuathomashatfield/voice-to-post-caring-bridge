@@ -45,12 +45,11 @@ class OllamaProvider(LLMProvider):
 
 
 class OpenAICompatibleProvider(LLMProvider):
-    """Works with the OpenAI API itself or any OpenAI-compatible endpoint
-    (LM Studio, vLLM's OpenAI shim, OpenRouter, etc.)."""
+    """Works with OpenAI-compatible endpoints, including Groq."""
 
-    def __init__(self) -> None:
-        self.base_url = settings.openai_compatible_base_url.rstrip("/")
-        self.api_key = settings.openai_compatible_api_key
+    def __init__(self, base_url: str | None = None, api_key: str | None = None) -> None:
+        self.base_url = (base_url or settings.openai_compatible_base_url).rstrip("/")
+        self.api_key = api_key if api_key is not None else settings.openai_compatible_api_key
         self.model = settings.llm_model
         self.timeout = settings.llm_request_timeout
 

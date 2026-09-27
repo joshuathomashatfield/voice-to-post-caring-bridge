@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import json
 
 import httpx
 from typing import List, Optional
@@ -34,6 +35,7 @@ from backend.stt.audio_utils import (
     AudioValidationError, cleanup_temp_files, normalize_to_wav, validate_upload,
 )
 from backend.stt.whisper_engine import transcribe as whisper_transcribe
+from backend.stt.groq_engine import transcribe_bytes as groq_transcribe_bytes
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -43,8 +45,6 @@ logger = logging.getLogger("caringbridge.app")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
-EXPORTS_DIR = os.path.join(BASE_DIR, "exports")
-os.makedirs(EXPORTS_DIR, exist_ok=True)
 
 app = FastAPI(title=settings.app_name)
 
@@ -76,9 +76,11 @@ class NewSessionResponse(BaseModel):
     first_question: Optional[str]
     enable_tts: bool = True
     enable_autosave: bool = True
+    client_state: dict = Field(default_factory=dict)
 
 
 class MessageRequest(BaseModel):
+    client_state: Optional[dict] = None
     session_id: str
     text: str
     via_voice: bool = False
@@ -97,29 +99,35 @@ class TurnResponse(BaseModel):
     speak: Optional[str] = None  # text the frontend should optionally read aloud
     error: Optional[str] = None
     shared_state: dict = Field(default_factory=dict)
+    client_state: dict = Field(default_factory=dict)
 
 
 class ReviseRequest(BaseModel):
+    client_state: Optional[dict] = None
     session_id: str
     instruction: str
 
 
 class ManualEditRequest(BaseModel):
+    client_state: Optional[dict] = None
     session_id: str
     text: str
 
 
 class ContextEditRequest(BaseModel):
+    client_state: Optional[dict] = None
     session_id: str
     context: PostContext
 
 
 class ExportRequest(BaseModel):
+    client_state: Optional[dict] = None
     session_id: str
     format: str = "txt"  # txt | md
 
 
 class SimpleSessionRequest(BaseModel):
+    client_state: Optional[dict] = None
     session_id: str
 
 
@@ -127,11 +135,38 @@ class SimpleSessionRequest(BaseModel):
 # Helpers
 # --------------------------------------------------------------------------- #
 
-def _get_session(session_id: str) -> SessionState:
+def _get_session(session_id: str, client_state: Optional[dict] = None) -> SessionState:
+    """Load state from the browser for serverless deployments.
+
+    With SESSION_BACKEND=client, Vercel stores no conversational state. Every
+    request carries the current SessionState from sessionStorage and every
+    response returns the updated state. Local memory mode remains available
+    for development/tests.
+    """
+    if settings.session_backend.lower() == "client":
+        if not client_state:
+            raise HTTPException(status_code=400, detail="Browser session state is missing. Refresh the page to start a new session.")
+        try:
+            session = SessionState.model_validate(client_state)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Browser session state is invalid. Refresh the page to start a new session.") from exc
+        if session.session_id != session_id:
+            raise HTTPException(status_code=400, detail="Browser session ID does not match the submitted session.")
+        return session
     try:
         return session_manager.require(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Unknown or expired session_id.")
+
+
+def _save_session(session: SessionState) -> None:
+    session.touch()
+    if settings.session_backend.lower() != "client":
+        session_manager.save(session)
+
+
+def _client_state(session: SessionState) -> dict:
+    return session.model_dump(mode="json")
 
 
 def _current_privacy_flags(session: SessionState) -> List[str]:
@@ -177,26 +212,28 @@ app.mount("/frontend", StaticFiles(directory=FRONTEND_DIR), name="frontend")
 
 @app.post("/api/session", response_model=NewSessionResponse)
 def create_session():
-    session = session_manager.create()
+    session = SessionState() if settings.session_backend.lower() == "client" else session_manager.create()
     question = conversation.next_question(session)
     session.conversation_history.append(
         ConversationTurn(role="assistant", content=conversation.WELCOME_MESSAGE)
     )
     if question:
         session.conversation_history.append(ConversationTurn(role="assistant", content=question))
-    session_manager.save(session)
+    _save_session(session)
     return NewSessionResponse(
         session_id=session.session_id,
         welcome_message=conversation.WELCOME_MESSAGE,
         first_question=question,
         enable_tts=settings.enable_tts,
         enable_autosave=settings.enable_autosave,
+        client_state=_client_state(session),
     )
 
 
 @app.post("/api/clear")
 def clear_session(req: SimpleSessionRequest):
-    session_manager.clear(req.session_id)
+    if settings.session_backend.lower() != "client":
+        session_manager.clear(req.session_id)
     return {"status": "cleared"}
 
 
@@ -216,13 +253,28 @@ def _shared_state(session: SessionState) -> dict:
 
 
 def _post_response(session: SessionState) -> dict:
+    _save_session(session)
     return {"post_text": session.current_post_text,
             "privacy_flags": _current_privacy_flags(session),
-            "shared_state": _shared_state(session)}
+            "shared_state": _shared_state(session),
+            "client_state": _client_state(session)}
+
+
+@app.post("/api/state")
+def get_state(req: SimpleSessionRequest):
+    session = _get_session(req.session_id, req.client_state)
+    return {**_shared_state(session), **_post_response(session), "session_id": req.session_id,
+            "post_versions": len(session.post_versions),
+            "enable_tts": settings.enable_tts,
+            "enable_autosave": settings.enable_autosave,
+            "conversation_history": [t.model_dump() for t in session.conversation_history]}
 
 
 @app.get("/api/state/{session_id}")
-def get_state(session_id: str):
+def get_state_legacy(session_id: str):
+    """Local-memory compatibility route; hosted client mode uses POST /api/state."""
+    if settings.session_backend.lower() == "client":
+        raise HTTPException(status_code=400, detail="Hosted sessions are stored in the browser. Use POST /api/state with client_state.")
     session = _get_session(session_id)
     return {**_shared_state(session), **_post_response(session), "session_id": session_id,
             "post_versions": len(session.post_versions),
@@ -233,14 +285,14 @@ def get_state(session_id: str):
 
 @app.post("/api/context")
 def edit_context(req: ContextEditRequest):
-    session = _get_session(req.session_id)
+    session = _get_session(req.session_id, req.client_state)
     if session.context != req.context:
         for field, value in req.context.model_dump().items():
             if getattr(session.context, field) != value:
                 session.context_corrections[field] = value
         session.context = req.context
         session.draft_needs_update = session.current_post_text is not None
-    session_manager.save(session)
+    _save_session(session)
     return _post_response(session)
 
 
@@ -300,7 +352,7 @@ def _process_turn(session: SessionState, text: str, via_voice: bool) -> TurnResp
 
         elif result.intent == Intent.RESTART:
             fresh = SessionState(session_id=session.session_id)
-            session_manager.save(fresh)
+            _save_session(fresh)
             session = fresh
             question = conversation.next_question(session)
             response.assistant_message = "No problem -- let's start fresh."
@@ -377,15 +429,16 @@ def _process_turn(session: SessionState, text: str, via_voice: bool) -> TurnResp
     if result.intent != Intent.STOP_AUDIO and not response.speak:
         response.speak = " ".join(part for part in
                                   (response.assistant_message, response.next_question, response.error) if part) or None
-    session_manager.save(session)
+    _save_session(session)
     response.stage = session.stage.value
     response.shared_state = _shared_state(session)
+    response.client_state = _client_state(session)
     return response
 
 
 @app.post("/api/message", response_model=TurnResponse)
 def send_message(req: MessageRequest):
-    session = _get_session(req.session_id)
+    session = _get_session(req.session_id, req.client_state)
     if not req.text or not req.text.strip():
         raise HTTPException(status_code=400, detail="Message text is empty.")
     return _process_turn(session, req.text.strip(), via_voice=req.via_voice)
@@ -402,8 +455,14 @@ class AudioTurnResponse(TurnResponse):
 
 
 @app.post("/api/audio", response_model=AudioTurnResponse)
-async def send_audio(session_id: str = Form(...), file: UploadFile = File(...)):
-    session = _get_session(session_id)
+async def send_audio(session_id: str = Form(...), client_state: str = Form(""), file: UploadFile = File(...)):
+    browser_state = None
+    if settings.session_backend.lower() == "client":
+        try:
+            browser_state = json.loads(client_state)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Browser session state is missing or invalid.")
+    session = _get_session(session_id, browser_state)
     raw_bytes = await file.read()
 
     try:
@@ -413,21 +472,34 @@ async def send_audio(session_id: str = Form(...), file: UploadFile = File(...)):
 
     suffix = os.path.splitext(file.filename or "")[1] or ".webm"
     wav_path = None
-    audio_phase = "conversion"
+    audio_phase = "transcription" if settings.stt_provider.lower() == "groq" else "conversion"
     try:
-        wav_path = await run_in_threadpool(normalize_to_wav, raw_bytes, suffix=suffix)
-        audio_phase = "transcription"
-        transcript = await run_in_threadpool(whisper_transcribe, wav_path)
+        if settings.stt_provider.lower() == "groq":
+            transcript = await run_in_threadpool(
+                groq_transcribe_bytes,
+                raw_bytes,
+                file.filename or f"turn{suffix}",
+                file.content_type or "audio/webm",
+            )
+        else:
+            wav_path = await run_in_threadpool(normalize_to_wav, raw_bytes, suffix=suffix)
+            audio_phase = "transcription"
+            transcript = await run_in_threadpool(whisper_transcribe, wav_path)
     except Exception as exc:
-        logger.error("audio_processing_failed error_type=%s", type(exc).__name__)
-        if not shutil.which("ffmpeg"):
+        logger.error("audio_processing_failed provider=%s error_type=%s", settings.stt_provider, type(exc).__name__)
+        if settings.stt_provider.lower() == "groq":
+            message = (
+                "Recording received, but cloud transcription failed. Check GROQ_API_KEY "
+                "and STT_PROVIDER=groq in the deployment environment, then try again. You can still type."
+            )
+        elif not shutil.which("ffmpeg"):
             message = "Recording received, but FFmpeg is missing. In your caringbridge environment run: conda install -c conda-forge ffmpeg. Then restart the app."
         elif audio_phase == "conversion":
             message = "Recording received, but the audio could not be decoded. Try a shorter recording or another browser; you can still type."
         elif isinstance(exc, ImportError):
-            message = "Recording received, but a speech-recognition dependency could not load. Run python -m pip install -r requirements.txt in your caringbridge environment, then restart."
+            message = "Recording received, but a speech-recognition dependency could not load. Install the local speech extras, then restart."
         else:
-            message = "Recording received, but transcription failed. Check the Whisper model download, STT_DEVICE and STT_COMPUTE_TYPE settings. Try STT_DEVICE=cpu and STT_COMPUTE_TYPE=int8, then restart. You can still type."
+            message = "Recording received, but transcription failed. Check the local Whisper settings, then restart. You can still type."
         return AudioTurnResponse(
             session_id=session.session_id,
             intent=Intent.UNKNOWN.value,
@@ -437,6 +509,7 @@ async def send_audio(session_id: str = Form(...), file: UploadFile = File(...)):
             raw_transcript="",
             clean_transcript="",
             transcript_reliable=False,
+            client_state=_client_state(session),
         )
     finally:
         if wav_path:
@@ -444,7 +517,7 @@ async def send_audio(session_id: str = Form(...), file: UploadFile = File(...)):
 
     if not transcript.is_reliable:
         session.stt_retry_attempts += 1
-        session_manager.save(session)
+        _save_session(session)
         return AudioTurnResponse(
             session_id=session.session_id,
             intent=Intent.UNKNOWN.value,
@@ -454,6 +527,7 @@ async def send_audio(session_id: str = Form(...), file: UploadFile = File(...)):
             raw_transcript=transcript.raw_transcript,
             clean_transcript=transcript.clean_transcript,
             transcript_reliable=False,
+            client_state=_client_state(session),
         )
 
     base_response = await run_in_threadpool(_process_turn, session, transcript.clean_transcript, True)
@@ -471,23 +545,23 @@ async def send_audio(session_id: str = Form(...), file: UploadFile = File(...)):
 
 @app.post("/api/generate")
 def generate(req: SimpleSessionRequest):
-    session = _get_session(req.session_id)
+    session = _get_session(req.session_id, req.client_state)
     try:
         draft = _generate_and_store(session)
     except LLMUnavailableError:
         raise HTTPException(status_code=502, detail="Couldn't generate the draft just now. Your responses have been preserved.")
-    session_manager.save(session)
+    _save_session(session)
     return _post_response(session)
 
 
 @app.post("/api/revise")
 def revise(req: ReviseRequest):
-    session = _get_session(req.session_id)
+    session = _get_session(req.session_id, req.client_state)
     try:
         revised = _revise_and_store(session, req.instruction)
     except LLMUnavailableError:
         raise HTTPException(status_code=502, detail="Couldn't generate the revision just now. Your previous draft is still safe.")
-    session_manager.save(session)
+    _save_session(session)
     return _post_response(session)
 
 
@@ -495,33 +569,33 @@ def revise(req: ReviseRequest):
 def manual_edit(req: ManualEditRequest):
     """Records a manual edit as a new version so the user's own wording is
     preserved and later revisions build on it, not on a stale AI draft."""
-    session = _get_session(req.session_id)
+    session = _get_session(req.session_id, req.client_state)
     if session.current_post_text != req.text:
         session_manager.add_version(session, req.text, source="manual_edit")
         session.manual_edits += 1
-    session_manager.save(session)
+    _save_session(session)
     return _post_response(session)
 
 
 @app.post("/api/undo")
 def undo(req: SimpleSessionRequest):
-    session = _get_session(req.session_id)
+    session = _get_session(req.session_id, req.client_state)
     version = session_manager.undo(session)
-    session_manager.save(session)
+    _save_session(session)
     return _post_response(session)
 
 
 @app.post("/api/redo")
 def redo(req: SimpleSessionRequest):
-    session = _get_session(req.session_id)
+    session = _get_session(req.session_id, req.client_state)
     version = session_manager.redo(session)
-    session_manager.save(session)
+    _save_session(session)
     return _post_response(session)
 
 
 @app.post("/api/export")
 def export(req: ExportRequest):
-    session = _get_session(req.session_id)
+    session = _get_session(req.session_id, req.client_state)
     text = session.current_post_text
     if not text:
         raise HTTPException(status_code=400, detail="There's no post to export yet.")
@@ -533,7 +607,10 @@ def export(req: ExportRequest):
 @app.get("/api/diagnostics")
 def diagnostics():
     """Read-only setup check. Does not record audio or send conversation content."""
-    audio = "FFmpeg found" if shutil.which("ffmpeg") else "FFmpeg missing — voice transcription cannot run"
+    if settings.stt_provider.lower() == "groq":
+        audio = "Groq speech-to-text configured" if settings.groq_api_key else "Groq speech-to-text selected, but GROQ_API_KEY is missing"
+    else:
+        audio = "FFmpeg found" if shutil.which("ffmpeg") else "FFmpeg missing — local voice transcription cannot run"
     if settings.llm_provider == "ollama":
         try:
             with httpx.Client(timeout=4.0) as client:
@@ -546,6 +623,9 @@ def diagnostics():
                      else f"Ollama connected, but {settings.llm_model} is not installed. Run ollama pull {settings.llm_model}")
         except (httpx.HTTPError, ValueError):
             model = "Cannot reach Ollama. Open Ollama and check OLLAMA_HOST in .env"
+    elif settings.llm_provider == "groq":
+        model = (f"Groq provider configured with {settings.llm_model} (connection not tested by this check)"
+                 if settings.groq_api_key else "Groq provider selected, but GROQ_API_KEY is missing")
     elif settings.llm_provider == "openai_compatible":
         model = "OpenAI-compatible provider configured; connection not tested by this check"
     else:

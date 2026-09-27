@@ -65,6 +65,12 @@ def get_provider() -> LLMProvider:
     if settings.llm_provider == "ollama":
         from backend.llm.ollama_provider import OllamaProvider
         return OllamaProvider()
+    if settings.llm_provider == "groq":
+        from backend.llm.ollama_provider import OpenAICompatibleProvider
+        return OpenAICompatibleProvider(
+            base_url=settings.groq_base_url,
+            api_key=settings.groq_api_key,
+        )
     if settings.llm_provider == "openai_compatible":
         from backend.llm.ollama_provider import OpenAICompatibleProvider
         return OpenAICompatibleProvider()

@@ -1,15 +1,14 @@
-"""
-In-memory session state management.
+"""Session-state helpers.
 
-Sessions are intentionally NOT persisted server-side beyond process memory:
-the design goal (see backend/privacy.py) is to avoid retaining sensitive
-health content longer than necessary. A background sweep removes sessions
-older than settings.session_ttl_minutes.
+The hosted Vercel profile keeps the authoritative conversation state in the
+participant's browser and sends it with each API request.  This module retains
+a small in-memory manager for local development/tests and provides the version
+history helpers used by both modes.
 """
 from __future__ import annotations
 
-import logging
 import hashlib
+import logging
 import threading
 import time
 from typing import Dict, Optional
@@ -21,14 +20,15 @@ logger = logging.getLogger("caringbridge.state")
 
 
 class SessionManager:
+    """In-memory store plus draft-version helpers."""
+
     def __init__(self) -> None:
         self._sessions: Dict[str, SessionState] = {}
         self._lock = threading.Lock()
 
     def create(self) -> SessionState:
         session = SessionState()
-        with self._lock:
-            self._sessions[session.session_id] = session
+        self.save(session)
         logger.info("session_created session_id=%s", session.session_id)
         return session
 
@@ -48,11 +48,8 @@ class SessionManager:
             self._sessions[session.session_id] = session
 
     def clear(self, session_id: str) -> None:
-        """Implements the 'Clear Session' privacy control: wipes transcript,
-        conversation state, generated post, and counters for this session."""
         with self._lock:
-            if session_id in self._sessions:
-                del self._sessions[session_id]
+            self._sessions.pop(session_id, None)
         logger.info("session_cleared session_id=%s", session_id)
 
     def sweep_expired(self) -> int:
@@ -63,11 +60,7 @@ class SessionManager:
             for sid in expired:
                 del self._sessions[sid]
                 removed += 1
-        if removed:
-            logger.info("session_sweep removed=%d", removed)
         return removed
-
-    # -- version history helpers -------------------------------------------------
 
     @staticmethod
     def context_digest(session: SessionState) -> str:
@@ -76,12 +69,13 @@ class SessionManager:
     @staticmethod
     def add_version(session: SessionState, text: str, source: str) -> PostVersion:
         next_version_no = max((v.version for v in session.post_versions), default=0) + 1
-        # If the user had undone to an earlier point and now creates a new
-        # version, we truncate the "future" (redo) branch -- standard
-        # undo/redo semantics.
         session.post_versions = session.post_versions[: session.current_version_index + 1]
-        version = PostVersion(version=next_version_no, text=text, source=source,
-                              context_digest=SessionManager.context_digest(session))
+        version = PostVersion(
+            version=next_version_no,
+            text=text,
+            source=source,
+            context_digest=SessionManager.context_digest(session),
+        )
         session.post_versions.append(version)
         session.current_version_index = len(session.post_versions) - 1
         return version
