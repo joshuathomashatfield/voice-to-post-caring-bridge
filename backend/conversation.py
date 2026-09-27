@@ -177,7 +177,7 @@ def extract_and_merge(session: SessionState, user_text: str, llm: LLMProvider) -
                 "role": "user",
                 "content": (
                     f"Current app stage: {session.stage.value}\n\n"
-                    f"CURRENT USER MESSAGE TO EXTRACT:\n{text}\n\n"
+                    f"CURRENT USER MESSAGE TO EXTRACT:\n{user_text}\n\n"
                     "Extract every supported fact explicitly stated in this message. "
                     "The current stage is only conversational context and must not limit extraction."
                 )
