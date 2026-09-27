@@ -360,10 +360,38 @@ def _process_turn(session: SessionState, text: str, via_voice: bool) -> TurnResp
             response.stage = session.stage.value
 
         elif result.intent == Intent.GENERATE_POST:
-            draft = _generate_and_store(session)
-            response.post_text = draft
-            response.assistant_message = "Here's a first draft based on what you've shared. Feel free to edit it directly, or ask me to change anything."
-            response.privacy_flags = _current_privacy_flags(session)
+            if not session.context.has_minimum_content():
+                # The user may have mentioned "post" conversationally rather than
+                # actually asking for generation. Treat this as an answer first.
+                result.intent = Intent.ANSWER
+                response.intent = Intent.ANSWER.value
+
+                before = session.context.model_copy(deep=True)
+                conversation.extract_and_merge(session, text, llm_provider)
+
+                if session.context != before:
+                    for field, value in session.context.model_dump().items():
+                        if getattr(before, field) != value and field in session.context_corrections:
+                            session.context_corrections[field] = value
+
+                    session.meaningful_answers += 1
+                    session.draft_needs_update = session.current_post_text is not None
+
+                question = conversation.next_question(session)
+                response.assistant_message = session.last_acknowledgement
+                response.next_question = question
+                response.ready_to_draft = (
+                    question is None and session.context.has_minimum_content()
+                )
+
+            else:
+                draft = _generate_and_store(session)
+                response.post_text = draft
+                response.assistant_message = (
+                    "Here's a first draft based on what you've shared. "
+                    "Feel free to edit it directly, or ask me to change anything."
+                )
+                response.privacy_flags = _current_privacy_flags(session)
 
         elif result.intent == Intent.REVISE_POST:
             instruction = result.instruction or text

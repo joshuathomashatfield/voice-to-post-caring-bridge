@@ -70,6 +70,27 @@ first CaringBridge health-update post. You must NEVER invent, infer, or embellis
 information the user did not state. If something wasn't mentioned, leave it null
 or as an empty list.
 
+IMPORTANT:
+A single user message may answer several future questions at once.
+Extract ALL clearly stated information from the entire message, regardless of
+the current question stage.
+
+Do not restrict extraction to the current stage.
+
+For example, if the user says:
+"My name is Jim and I'm writing about my mother. She had a stroke last week,
+she's recovering well, and we're feeling hopeful."
+
+you should populate every supported field you can:
+- relationship
+- reason_for_page
+- current_situation
+- current_status
+- tone
+- important_updates
+
+Never invent or infer facts that were not stated.
+
 Return ONLY minified JSON (no markdown fences, no commentary) matching exactly:
 {"acknowledgement": str|null, "person": str|null, "relationship": str|null, "reason_for_page": str|null,
 "current_situation": str|null, "current_status": str|null,
@@ -148,13 +169,20 @@ def extract_and_merge(session: SessionState, user_text: str, llm: LLMProvider) -
     session.last_acknowledgement = None
     try:
         raw = llm.generate([
-            {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
-            {"role": "user", "content": (
-                f"Current question stage: {session.stage.value}\n"
-                f"Recent conversation: {json.dumps([t.model_dump(include={'role', 'content'}) for t in session.conversation_history[-5:]])}\n"
-                f"User said: {user_text}"
-            )},
-        ], temperature=0.1)
+            {
+                "role": "system",
+                "content": _EXTRACTION_SYSTEM_PROMPT
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Current app stage: {session.stage.value}\n\n"
+                    f"CURRENT USER MESSAGE TO EXTRACT:\n{text}\n\n"
+                    "Extract every supported fact explicitly stated in this message. "
+                    "The current stage is only conversational context and must not limit extraction."
+                )
+            },
+        ], temperature=0.0)
         cleaned = raw.strip().strip("`")
         if cleaned.lower().startswith("json"):
             cleaned = cleaned[4:].strip()
