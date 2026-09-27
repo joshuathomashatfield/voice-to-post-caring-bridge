@@ -1,0 +1,9 @@
+# Install these in addition to requirements.txt only if you want the original
+# local Whisper / optional server-side TTS development path.
+-r requirements.txt
+faster-whisper==1.0.3
+numpy==1.26.4
+soundfile==0.12.1
+webrtcvad==2.0.10
+pyttsx3==2.90
+pytest==8.3.3
